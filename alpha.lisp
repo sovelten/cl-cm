@@ -13,7 +13,9 @@
 ;;;; Nodes are tagged vectors, e.g.
 ;;;;   #("var" <id>)                      lexical variable reference
 ;;;;   #("free" <pkg> <name>)             free variable reference
+;;;;   #("vcid" <cid>)                    free variable resolved to a CID
 ;;;;   #("fref" <id>) / #("gref" <pkg> <name>)   function reference
+;;;;   #("fcid" <cid>)                    free function resolved to a CID
 ;;;;   #("lambda" <lambda-list> <body>)   lambda
 ;;;;   #("call" <fn> <args>)
 ;;;;   #("quote" <datum>) ...
@@ -21,6 +23,36 @@
 (in-package #:cl-cm)
 
 (declaim (ftype (function (t lenv) t) norm))
+
+(defvar *reference-resolver* nil
+  "Optional function `(lambda (namespace symbol) cid)' used to resolve a
+free identifier to the content identifier of the definition it refers to.
+
+NAMESPACE is `:variable' or `:function'.  When the function returns a
+non-NIL CID (a string) for a free identifier, that identifier is
+normalized to a content-addressed reference node — `#(\"vcid\" cid)' for a
+variable, `#(\"fcid\" cid)' for a function — instead of a name-based one.
+
+This is what turns cl-cm's hashing from *name-based* into *recursive
+content addressing* (as in Unison): the CID of a form then depends on the
+CIDs of the definitions it references, so it is invariant under renaming
+of *those* definitions too, and editing a referenced definition changes
+the referring form's CID.  Bound identifiers are unaffected: the lexical
+environment still shadows, and a binding is resolved to its integer id
+before the resolver is ever consulted.
+
+The hook is only consulted when the identifier is free (not lexically
+bound) and only inside executable code; identifiers inside quoted data
+are never resolved.  NIL (the default) keeps the original name-based
+behavior, so existing CIDs are unchanged.")
+
+(defun resolve-reference (namespace symbol)
+  "Consult `*reference-resolver*' for SYMBOL in NAMESPACE.
+Returns the CID string the resolver produced, or NIL when there is no
+resolver or it declines to resolve the identifier."
+  (and *reference-resolver*
+       (let ((cid (funcall *reference-resolver* namespace symbol)))
+         (and cid (string cid)))))
 
 (defvar *special-forms* (make-hash-table :test #'eq)
   "Maps a special/macro symbol to a handler `(lambda (args env) ...)',
@@ -91,13 +123,19 @@ scope: tagbody tags are not visible across function boundaries."
   (let ((id (lookup-var env symbol)))
     (if id
         (nv "var" id)
-        (nv "free" (symbol-package-name symbol) (symbol-name symbol)))))
+        (let ((cid (resolve-reference :variable symbol)))
+          (if cid
+              (nv "vcid" cid)
+              (nv "free" (symbol-package-name symbol) (symbol-name symbol)))))))
 
 (defun norm-fun (env symbol)
   (let ((id (lookup-fun env symbol)))
     (if id
         (nv "fref" id)
-        (nv "gref" (symbol-package-name symbol) (symbol-name symbol)))))
+        (let ((cid (resolve-reference :function symbol)))
+          (if cid
+              (nv "fcid" cid)
+              (nv "gref" (symbol-package-name symbol) (symbol-name symbol)))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Bindings

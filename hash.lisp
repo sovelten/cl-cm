@@ -21,6 +21,15 @@ Alpha-equivalent forms (differing only in bound-identifier names)
 produce the same CID."
   (dasl:generate-cid (code-node form)))
 
+(defun code-cid-with-resolver (form resolver)
+  "Like CODE-CID, but resolve free identifiers through RESOLVER while
+normalizing FORM.  RESOLVER is a function `(lambda (namespace symbol)
+cid)' — see *REFERENCE-RESOLVER*.  With this, the resulting CID depends
+on the CIDs of the definitions FORM references (recursive content
+addressing), not on their names."
+  (let ((*reference-resolver* resolver))
+    (code-cid form)))
+
 (defun same-code-p (form-a form-b)
   "True when FORM-A and FORM-B have the same content identifier,
 i.e. when they are alpha-equivalent modulo *code-version*."

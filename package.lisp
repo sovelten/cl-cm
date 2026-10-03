@@ -18,6 +18,10 @@ invariant under renaming of bound variables.")
    ;; normalizer extension point
    #:define-form
    #:*special-forms*
+   ;; global reference resolution (recursive content addressing)
+   #:*reference-resolver*
+   #:resolve-reference
+   #:code-cid-with-resolver
    ;; environment (exposed for extension / inspection)
    #:lenv
    #:make-lenv

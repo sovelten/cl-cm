@@ -100,5 +100,39 @@
       (not (cl-cm:same-code-p '(lambda (&key y) y)
                             '(lambda (&key b) b))))
 
+    (format t "~&  -- global references resolved to content ids~%")
+    (flet ((resolve-as (table)
+             (lambda (namespace symbol)
+               (when (eq namespace :function)
+                 (cdr (assoc (symbol-name symbol) table :test #'string=))))))
+      (let ((r (resolve-as '(("FOO" . "cid-foo") ("BAR" . "cid-foo")))))
+        ;; A resolved reference is not the same as an unresolved (named) one.
+        (check "resolved reference differs from named reference"
+          (not (string= (cl-cm:code-cid-with-resolver '(lambda (x) (foo x)) r)
+                        (cl-cm:code-cid '(lambda (x) (foo x))))))
+        ;; Two different *names* bound to the *same* CID hash identically:
+        ;; references are by content, not by name.
+        (check "different names, same resolved cid"
+          (string= (cl-cm:code-cid-with-resolver '(lambda (x) (foo x)) r)
+                   (cl-cm:code-cid-with-resolver '(lambda (x) (bar x)) r)))
+        ;; Changing the CID a name resolves to changes the referrer's CID.
+        (check "changing the referenced cid changes the referrer"
+          (not (string= (cl-cm:code-cid-with-resolver '(lambda (x) (foo x)) r)
+                        (cl-cm:code-cid-with-resolver
+                         '(lambda (x) (foo x))
+                         (resolve-as '(("FOO" . "cid-other"))))))))
+      (let ((anything (lambda (namespace symbol)
+                        (declare (ignore namespace symbol))
+                        "always-a-cid")))
+        ;; Bound identifiers shadow: the resolver is never consulted for them,
+        ;; so a fully-bound form hashes exactly as it does without a resolver.
+        (check "bound identifiers are not resolved"
+          (string= (cl-cm:code-cid-with-resolver '(lambda (x) x) anything)
+                   (cl-cm:code-cid '(lambda (x) x))))
+        ;; Quoted data is data: symbols inside QUOTE are never resolved.
+        (check "quoted symbols are not resolved"
+          (string= (cl-cm:code-cid-with-resolver '(quote (a b c)) anything)
+                   (cl-cm:code-cid '(quote (a b c)))))))
+
     (format t "~&~D checks, ~D failure~:P.~%" *checks* *failures*)
     (zerop *failures*)))

@@ -37,6 +37,7 @@ trees and therefore hash to the same CID.
 (asdf:load-system :cl-cm)   ; requires cl-dasl on the ASDF source registry
 
 (cl-cm:code-cid form)          ; -> CIDv1 string (dag-cbor, sha2-256, base32)
+(cl-cm:code-cid-with-resolver form resolver) ; -> CID with free refs by content
 (cl-cm:same-code-p a b)        ; -> T when alpha-equivalent
 (cl-cm:normalize-code form)    ; -> the canonical tree (for inspection)
 (cl-cm:code-node form)         ; -> version-tagged tree that is actually hashed
@@ -71,6 +72,37 @@ Recognized binding forms: `lambda`, `let`, `let*`, `flet`, `labels`,
 plus `quote` and `function`. Everything else is treated as a function call and
 walked generically.
 
+## Content-addressed references (recursive hashing)
+
+By default a *free* identifier keeps its `package:name`, so two forms that
+reference different names (or the same name defined differently elsewhere)
+hash differently. Bind `*reference-resolver*` — or call
+`code-cid-with-resolver` — to replace a free identifier with the **CID of the
+definition it refers to**:
+
+```lisp
+(cl-cm:code-cid-with-resolver
+ '(lambda (x) (foo x))
+ (lambda (namespace symbol)
+   (when (and (eq namespace :function) (string= (symbol-name symbol) "FOO"))
+     "bafyreia...")))            ; the CID of FOO's definition
+;; => a CID that depends on FOO's definition, not on the name "FOO"
+```
+
+A resolved free identifier becomes `#("fcid" <cid>)` (function) or
+`#("vcid" <cid>)` (variable) instead of `#("gref" pkg name)` /
+`#("free" pkg name)`. This is what makes hashing *recursive* (as in Unison):
+the CID of a form depends on the CIDs of the definitions it references, so
+
+* renaming a referenced definition does **not** change the referring form's
+  CID, and
+* editing a referenced definition **does** change it.
+
+Bound identifiers are unaffected — the lexical environment always wins, so
+`*reference-resolver*` is never consulted for a bound name — and identifiers
+inside quoted data are never resolved. With no resolver bound (the default)
+the output is byte-for-byte what it was before, so existing CIDs are stable.
+
 ## Extending
 
 Any binding form `cl-cm` does not know about can be added without touching the
@@ -91,9 +123,11 @@ walker:
   `with-open-file`, `with-slots`) will have its variables treated as *free*
   identifiers, so renaming them would change the hash. Register a handler (or
   macroexpand first) to cover these.
-* **Global names are matched by name, not by CID.** Free identifiers keep their
-  `package:name`; a real system would replace them with the CID of the
-  definition they reference, giving true recursive content addressing.
+* **Recursive content addressing is opt-in, not automatic.** Free identifiers
+  keep their `package:name` unless you bind `*reference-resolver*` (see
+  *Content-addressed references*). `cl-cm` does not itself track a definition
+  graph, resolve name collisions, or break reference cycles — those belong to
+  the layer built on top (see `apeiron/verbs`).
 * **`&key` semantics are honored.** `(lambda (&key y) ...)` and
   `(lambda (&key b) ...)` are *not* equivalent, because the accepted keyword
   `:y` vs `:b` is part of the interface. Explicit `((:y b) ...)` forms *are*
@@ -110,8 +144,9 @@ walker:
 (cl-cm-tests:run-self-test)
 ```
 
-24 checks: renaming bound identifiers must not change the CID, and structural
-differences (free names, binding order, string case, quoted data) must.
+29 checks: renaming bound identifiers must not change the CID, structural
+differences (free names, binding order, string case, quoted data) must, and a
+resolved free reference must hash by the referenced CID, not its name.
 
 ## License
 

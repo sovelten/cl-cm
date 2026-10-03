@@ -6,8 +6,12 @@
   :license "MIT"
   :version "0.1.0"
   :serial t
-  :depends-on (#:cl-dasl)
+  :depends-on (#:trivial-utf-8
+               #:ieee-floats
+               #:cl-base32
+               #:ironclad)
   :components ((:file "package")
+               (:file "dasl")
                (:file "base")
                (:file "alpha")
                (:file "hash")))

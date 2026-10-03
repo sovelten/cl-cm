@@ -19,7 +19,7 @@ silently reusing old identifiers.")
   "Content identifier for FORM: CIDv1, dag-cbor, sha2-256, base32.
 Alpha-equivalent forms (differing only in bound-identifier names)
 produce the same CID."
-  (dasl:generate-cid (code-node form)))
+  (generate-cid (code-node form)))
 
 (defun code-cid-with-resolver (form resolver)
   "Like CODE-CID, but resolve free identifiers through RESOLVER while

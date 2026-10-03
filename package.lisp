@@ -5,8 +5,8 @@
   (:documentation
    "Content-Addressable Common Lisp code.
 
-Normalize a form into an alpha-renamed canonical tree and hash it with
-DASL (dag-cbor, sha2-256) via cl-dasl, so that the identifier is
+Normalize a form into an alpha-renamed canonical tree and hash it to a
+CIDv1 (DASL / dag-cbor / sha2-256 / base32), so that the identifier is
 invariant under renaming of bound variables.")
   (:export
    ;; hashing / addressing

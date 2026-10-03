@@ -11,9 +11,10 @@
   "Build a canonical node: a general vector of ITEMS.
 
 Nodes are plain vectors of strings, integers and nested vectors so they
-can be handed straight to DASL/CBOR.  Lists are avoided on purpose:
-cl-dasl decodes/encodes a list whose every element is a cons as an
-alist and reorders it, which would be fatal for stable hashing."
+can be handed straight to the DASL/CBOR encoder.  Lists are avoided on
+purpose: CBOR has ambiguous list encodings (a list whose every element
+is a cons is encoded as an alist and reordered), which would be fatal
+for stable hashing."
   (coerce items 'vector))
 
 (defun symbol-package-name (symbol)

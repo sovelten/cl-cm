@@ -4,13 +4,14 @@ A minimal proof of concept in the spirit of [Unison](https://unison-lang.org/):
 give a piece of Common Lisp *code*, get back a content identifier that is
 **invariant under renaming of bound variables** (alpha-equivalence).
 
-It is a thin layer on top of [cl-dasl](../cl-dasl) (DASL / dag-cbor / CIDv1 /
-sha2-256), which supplies the actual encoding and hashing.
+Its DASL/CBOR encoding and CIDv1 generation (dag-cbor / sha2-256 / base32) are
+self-contained: the encoder was moved from [cl-dasl](../cl-dasl) into
+`dasl.lisp`, so cl-cm no longer depends on cl-dasl.
 
 ## Idea
 
 ```
-source form  ──normalize──▶  canonical tree  ──dasl:generate-cid──▶  CID
+source form  ──normalize──▶  canonical tree  ──encode + CID──▶  CID
 ```
 
 `cl-cm:normalize-code` walks a form with a lexical environment and rewrites it
@@ -34,7 +35,7 @@ trees and therefore hash to the same CID.
 ## Usage
 
 ```lisp
-(asdf:load-system :cl-cm)   ; requires cl-dasl on the ASDF source registry
+(asdf:load-system :cl-cm)
 
 (cl-cm:code-cid form)          ; -> CIDv1 string (dag-cbor, sha2-256, base32)
 (cl-cm:code-cid-with-resolver form resolver) ; -> CID with free refs by content
@@ -151,3 +152,9 @@ resolved free reference must hash by the referenced CID, not its name.
 ## License
 
 MIT
+
+The DASL/CBOR encoder and CID generation in `dasl.lisp` are moved/adapted
+from [cl-dasl](https://gitlab.nijl.ac.jp/CHISE/cl-dasl) (MIT), by
+_Mihai Bazon <mihai.bazon@gmail.com>_ and _Tomohiko Morioka_, which is
+itself based on the CBOR encoder/decoder for Common Lisp (cbor.lisp) by
+_Mihai Bazon <mihai.bazon@gmail.com>_.

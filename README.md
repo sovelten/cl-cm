@@ -104,6 +104,79 @@ Bound identifiers are unaffected — the lexical environment always wins, so
 inside quoted data are never resolved. With no resolver bound (the default)
 the output is byte-for-byte what it was before, so existing CIDs are stable.
 
+## The code database (`cl-cm-db`)
+
+`cl-cm` addresses code; `cl-cm-db` remembers **names** for it. A
+`code-database` associates a stable *identity* (a symbol, e.g. a top-level
+name) with the CID of a piece of code, and stores that code. It is exactly
+the "definition graph" the recursive-hashing section above leaves to the
+layer built on top.
+
+The database is split in two, each half in its own file:
+
+* **The identity log** — append-only text, `NAME.identities`. Every
+  definition or redefinition appends one readable line:
+
+  ```lisp
+  (:define "2024-05-01T09:30:00Z" "CL-USER::FACT" "bafyreidpgybb...")
+  (:set    "2024-05-01T09:41:12Z" "CL-USER::FACT" "bafyreih4xt...")
+  ```
+
+  Folding the file from the top and keeping the last record per key yields
+  the *current* identities, so a later compaction can rewrite it in place
+  without changing the format. Each line carries a UTC timestamp.
+
+* **The code store** — a directory, `NAME.objects/`, with one object file
+  per CID (git/Unison-style). Each object file holds two things: the
+  DASL/CBOR bytes of the resolved canonical node (the bytes the CID hashes
+  — literally *the code saved in the hash*) and the original source
+  expression that produced it, printed readably:
+
+  ```
+  "CMOB"  version  u32-blob-length  <CBOR blob>  u32-source-length  <source text>
+  ```
+
+  The CID is recovered from the blob on load, so an object file is
+  self-verifying.
+
+The database doubles as cl-cm's reference resolver, so content addressing
+is *recursive*: a definition's CID depends on the CIDs of the identities it
+references.
+
+```lisp
+(defparameter db (cl-cm-db:make-database :directory #p"~/code-db/" :name "my"))
+
+(cl-cm-db:load-database db)                    ; populate the in-memory caches
+
+(cl-cm-db:defidentity 'fact
+  '(lambda (n) (if (zerop n) 1 (* n (fact (1- n)))))
+  db)
+;; => "bafyrei..."  (also stored in the code store, logged in the identity log)
+
+(cl-cm-db:setidentity 'fact '(lambda (n) (factorial n)) db)   ; change it
+
+(cl-cm-db:identity-cid 'fact db)    ; -> current CID
+(cl-cm-db:identity-code 'fact db)   ; -> the stored source expression
+```
+
+`defidentity` signals an error when the identity is already defined;
+`setidentity` signals one when it is not — so the two are hard to confuse.
+Neither evaluates the form: they take an s-expression *as data*, which is
+what a codebase manager wants.
+
+Storage is content-addressed and immutable. Storing the same code twice is
+a no-op, and changing a referenced definition never rewrites what already
+exists: the referrer's identity keeps its old CID until you `setidentity`
+it, at which point it gets a *new* CID. Old objects stay on disk, still
+addressable by their own hash. (A definition's CID therefore depends only
+on which identities existed when it was defined — a free reference to a
+name defined later is hashed by name.)
+
+Key functions: `make-database`, `load-database` / `ensure-database`,
+`defidentity`, `setidentity`, `identity-cid`, `identity-code`,
+`store-code`, `database-code-cid`, `database-code-node`,
+`database-code-blob`, `database-resolver`.
+
 ## Extending
 
 Any binding form `cl-cm` does not know about can be added without touching the
@@ -141,13 +214,20 @@ walker:
 ## Tests
 
 ```lisp
-(asdf:test-system :cl-cm)     ; or:
-(cl-cm-tests:run-self-test)
+(asdf:test-system :cl-cm)        ; runs the hand-rolled checks AND the FiveAM suite
+(cl-cm-tests:run-self-test)      ; the same thing, at the REPL
+(fiveam:run! 'cl-cm-tests::cl-cm-db-suite)   ; just the database suite
 ```
 
-29 checks: renaming bound identifiers must not change the CID, structural
-differences (free names, binding order, string case, quoted data) must, and a
-resolved free reference must hash by the referenced CID, not its name.
+The core `cl-cm` behaviour is covered by 29 dependency-free checks: renaming
+bound identifiers must not change the CID, structural differences (free names,
+binding order, string case, quoted data) must, and a resolved free reference
+must hash by the referenced CID, not its name.
+
+The database layer is covered by a FiveAM suite (`test-db.lisp`): defining and
+redefining identities, the timestamped append-only log, the object-file layout
+\(CBOR + source, self-verifying by CID), persistence across a reload, and
+recursive content addressing through referenced identities.
 
 ## License
 

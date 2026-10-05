@@ -9,9 +9,11 @@
   :depends-on (#:trivial-utf-8
                #:ieee-floats
                #:cl-base32
-               #:ironclad)
+               #:ironclad
+               #:uiop)
   :components ((:file "package")
                (:file "dasl")
                (:file "base")
                (:file "alpha")
-               (:file "hash")))
+               (:file "hash")
+               (:file "db")))

@@ -1,12 +1,16 @@
 ;;;; test.lisp --- self tests for cl-cm
 ;;;;
-;;;; Deliberately dependency-free (no test framework): run with
+;;;; The core alpha-equivalence/hashing checks below are dependency-free
+;;;; (a tiny hand-rolled CHECK harness); the database layer is covered by
+;;;; the FiveAM suite in test-db.lisp.  Run everything with
 ;;;;   (asdf:test-system :cl-cm)
 ;;;; or
 ;;;;   (cl-cm-tests:run-self-test)
+;;;; or run just the FiveAM suite with
+;;;;   (fiveam:run! 'cl-cm-tests::cl-cm-db-suite)
 
 (defpackage #:cl-cm-tests
-  (:use #:cl)
+  (:use #:cl #:fiveam)
   (:export #:run-self-test))
 
 (in-package #:cl-cm-tests)
@@ -134,5 +138,7 @@
           (string= (cl-cm:code-cid-with-resolver '(quote (a b c)) anything)
                    (cl-cm:code-cid '(quote (a b c)))))))
 
-    (format t "~&~D checks, ~D failure~:P.~%" *checks* *failures*)
-    (zerop *failures*)))
+    (format t "~&  -- code database (FiveAM suite)~%")
+    (let ((database-ok (funcall 'run-database-tests)))
+      (format t "~&~D checks, ~D failure~:P.~%" *checks* *failures*)
+      (and database-ok (zerop *failures*)))))

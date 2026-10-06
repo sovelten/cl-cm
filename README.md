@@ -148,12 +148,11 @@ references.
 
 (cl-cm-db:load-database db)                    ; populate the in-memory caches
 
-(cl-cm-db:defidentity 'fact
-  '(lambda (n) (if (zerop n) 1 (* n (fact (1- n)))))
-  db)
+(cl-cm-db:defidentity db 'fact
+  '(lambda (n) (if (zerop n) 1 (* n (fact (1- n))))))
 ;; => "bafyrei..."  (also stored in the code store, logged in the identity log)
 
-(cl-cm-db:setidentity 'fact '(lambda (n) (factorial n)) db)   ; change it
+(cl-cm-db:setidentity db 'fact '(lambda (n) (factorial n)))   ; change it
 
 (cl-cm-db:identity-cid 'fact db)    ; -> current CID
 (cl-cm-db:identity-code 'fact db)   ; -> the stored source expression
@@ -162,7 +161,17 @@ references.
 `defidentity` signals an error when the identity is already defined;
 `setidentity` signals one when it is not — so the two are hard to confuse.
 Neither evaluates the form: they take an s-expression *as data*, which is
-what a codebase manager wants.
+what a codebase manager wants.  Both take the database first, because the
+database is what defines the environment the code is resolved against.
+
+When the identity *is* an ordinary function, the `defun-identity` and
+`setf-identity` macros keep the Lisp definition and its stored identity in
+step — each `defun`s the name and registers the matching `(lambda ...)`:
+
+```lisp
+(cl-cm-db:defun-identity fact db (n) (factorial n))   ; like defun + defidentity
+(cl-cm-db:setf-identity  fact db (n) (factorial n))   ; like defun + setidentity
+```
 
 Storage is content-addressed and immutable. Storing the same code twice is
 a no-op, and changing a referenced definition never rewrites what already
@@ -173,9 +182,9 @@ on which identities existed when it was defined — a free reference to a
 name defined later is hashed by name.)
 
 Key functions: `make-database`, `load-database` / `ensure-database`,
-`defidentity`, `setidentity`, `identity-cid`, `identity-code`,
-`store-code`, `database-code-cid`, `database-code-node`,
-`database-code-blob`, `database-resolver`.
+`defidentity`, `setidentity`, `defun-identity`, `setf-identity`,
+`identity-cid`, `identity-code`, `store-code`, `database-code-cid`,
+`database-code-node`, `database-code-blob`, `database-resolver`.
 
 ## Extending
 

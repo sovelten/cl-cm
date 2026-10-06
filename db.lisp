@@ -347,13 +347,16 @@ cached state.  Idempotent; returns DB."
     (setf (gethash key (database-identities db)) cid)
     cid))
 
-(defun defidentity (identity form db)
+(defun defidentity (db identity form)
   "Associate IDENTITY with the code of FORM in DB and return the CID.
 
-IDENTITY is a symbol (or a string key); FORM is the source expression to
-store.  The code is stored in DB's code store and a `:define' record is
-appended to its identity log.  Signals an error when IDENTITY is already
-defined -- use SETIDENTITY to change an existing identity.
+DB comes first because it defines the environment: FORM is resolved
+against DB's identities, so the database is what gives the stored CID its
+meaning.  IDENTITY is a symbol (or a string key); FORM is the source
+expression to store.  The code is stored in DB's code store and a
+`:define' record is appended to its identity log.  Signals an error when
+IDENTITY is already defined -- use SETIDENTITY to change an existing
+identity.
 
 Note that a definition's CID depends only on the identities that exist
 at the moment it is defined: a free reference to a not-yet-defined name
@@ -366,17 +369,56 @@ change this CID."
              key))
     (%set-identity db identity form :define)))
 
-(defun setidentity (identity form db)
+(defun setidentity (db identity form)
   "Change the code associated with the existing IDENTITY in DB.
 
-Like DEFIDENTITY, but requires IDENTITY to already exist and appends a
-`:set' record to the log.  Returns the new CID."
+Like DEFIDENTITY, DB comes first because it defines the environment.
+Requires IDENTITY to already exist and appends a `:set' record to the
+log.  Returns the new CID."
   (ensure-database db)
   (let ((key (identity-key identity)))
     (unless (hash-present-p key (database-identities db))
       (error "Identity ~A is not defined; use DEFIDENTITY to define it."
              key))
     (%set-identity db identity form :set)))
+
+(defmacro defun-identity (name db lambda-list &body body)
+  "Define NAME as a function and register it as an identity in DB.
+
+This is the convenient form of DEFIDENTITY: NAME goes first, like DEFUN,
+and the identity is registered under the same name, so the function and
+its content-addressed definition stay in step:
+
+  (defun-identity fact db (n) (factorial n))
+
+is equivalent to
+
+  (defun fact (n) (factorial n))
+  (defidentity db 'fact '(lambda (n) (factorial n)))
+
+Signals an error when the identity already exists -- use SETF-IDENTITY
+to change it.  Returns the CID."
+  `(progn
+     (defun ,name ,lambda-list ,@body)
+     (defidentity ,db ',name '(lambda ,lambda-list ,@body))))
+
+(defmacro setf-identity (name db lambda-list &body body)
+  "Redefine NAME as a function and update its identity in DB.
+
+Like DEFUN-IDENTITY, but requires the identity to already exist and
+appends a `:set' record to the log:
+
+  (setf-identity fact db (n) (factorial n))
+
+is equivalent to
+
+  (defun fact (n) (factorial n))
+  (setidentity db 'fact '(lambda (n) (factorial n)))
+
+Returns the new CID."
+  `(progn
+     (defun ,name ,lambda-list ,@body)
+     (setidentity ,db ',name '(lambda ,lambda-list ,@body))))
 
 (defun identity-cid (identity db)
   "Current CID of IDENTITY in DB, or NIL when it is not defined."

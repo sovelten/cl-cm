@@ -33,7 +33,7 @@ Returns (values DATABASE DIRECTORY)."
 
 (test defidentity-stores-code-and-cid
   (multiple-value-bind (db) (fresh-test-database "def")
-    (let ((cid (cl-cm-db:defidentity 'foo '(lambda (x) (+ x 1)) db)))
+    (let ((cid (cl-cm-db:defidentity db 'foo '(lambda (x) (+ x 1)))))
       (is (stringp cid))
       (is (string= cid (cl-cm-db:identity-cid 'foo db)))
       (is (equal '(lambda (x) (+ x 1)) (cl-cm-db:identity-code 'foo db)))
@@ -41,17 +41,17 @@ Returns (values DATABASE DIRECTORY)."
 
 (test defidentity-twice-signals-an-error
   (multiple-value-bind (db) (fresh-test-database "dup")
-    (cl-cm-db:defidentity 'foo '(f) db)
-    (signals error (cl-cm-db:defidentity 'foo '(g) db))))
+    (cl-cm-db:defidentity db 'foo '(f))
+    (signals error (cl-cm-db:defidentity db 'foo '(g)))))
 
 (test setidentity-unknown-signals-an-error
   (multiple-value-bind (db) (fresh-test-database "unset")
-    (signals error (cl-cm-db:setidentity 'nope '(g) db))))
+    (signals error (cl-cm-db:setidentity db 'nope '(g)))))
 
 (test setidentity-changes-the-cid
   (multiple-value-bind (db) (fresh-test-database "set")
-    (let ((before (cl-cm-db:defidentity 'foo '(f 1) db)))
-      (let ((after (cl-cm-db:setidentity 'foo '(f 2) db)))
+    (let ((before (cl-cm-db:defidentity db 'foo '(f 1))))
+      (let ((after (cl-cm-db:setidentity db 'foo '(f 2))))
         (is (not (string= before after)))
         (is (string= after (cl-cm-db:identity-cid 'foo db)))
         (is (equal '(f 2) (cl-cm-db:identity-code 'foo db)))))))
@@ -62,8 +62,8 @@ Returns (values DATABASE DIRECTORY)."
 
 (test identity-log-is-append-only-and-timestamped
   (multiple-value-bind (db) (fresh-test-database "log")
-    (cl-cm-db:defidentity 'foo '(f) db)
-    (cl-cm-db:setidentity 'foo '(g) db)
+    (cl-cm-db:defidentity db 'foo '(f))
+    (cl-cm-db:setidentity db 'foo '(g))
     (let ((records '()))
       (with-open-file (in (cl-cm-db:identity-log-path db))
         (let ((*read-eval* nil))
@@ -86,7 +86,7 @@ Returns (values DATABASE DIRECTORY)."
 
 (test object-file-holds-cbor-and-source
   (multiple-value-bind (db) (fresh-test-database "obj")
-    (let* ((cid (cl-cm-db:defidentity 'foo '(lambda (x) (+ x 1)) db))
+    (let* ((cid (cl-cm-db:defidentity db 'foo '(lambda (x) (+ x 1))))
            (path (merge-pathnames cid (cl-cm-db:code-store-path db))))
       (is (probe-file path))
       (multiple-value-bind (blob source) (cl-cm-db::read-object path)
@@ -102,8 +102,8 @@ Returns (values DATABASE DIRECTORY)."
 
 (test database-persists-across-reload
   (multiple-value-bind (db directory) (fresh-test-database "persist")
-    (let ((cid (cl-cm-db:defidentity 'foo '(lambda (x) (+ x 1)) db)))
-      (cl-cm-db:defidentity 'bar '(lambda (y) (* y 2)) db)
+    (let ((cid (cl-cm-db:defidentity db 'foo '(lambda (x) (+ x 1)))))
+      (cl-cm-db:defidentity db 'bar '(lambda (y) (* y 2)))
       (let ((db2 (cl-cm-db:make-database :directory directory :name "persist")))
         (cl-cm-db:load-database db2)
         (is (string= cid (cl-cm-db:identity-cid 'foo db2)))
@@ -112,8 +112,8 @@ Returns (values DATABASE DIRECTORY)."
 
 (test reload-keeps-the-latest-value-of-a-changed-identity
   (multiple-value-bind (db directory) (fresh-test-database "latest")
-    (cl-cm-db:defidentity 'foo '(f 1) db)
-    (let ((after (cl-cm-db:setidentity 'foo '(f 2) db)))
+    (cl-cm-db:defidentity db 'foo '(f 1))
+    (let ((after (cl-cm-db:setidentity db 'foo '(f 2))))
       (let ((db2 (cl-cm-db:make-database :directory directory :name "latest")))
         (cl-cm-db:load-database db2)
         (is (string= after (cl-cm-db:identity-cid 'foo db2)))
@@ -125,20 +125,20 @@ Returns (values DATABASE DIRECTORY)."
 
 (test references-resolve-through-the-database
   (multiple-value-bind (db) (fresh-test-database "resolve")
-    (cl-cm-db:defidentity 'bar '(lambda (x) x) db)
+    (cl-cm-db:defidentity db 'bar '(lambda (x) x))
     ;; naming BAR, a known identity, is not the same as an unresolved name:
     (is (not (string= (cl-cm-db:database-code-cid db '(lambda (y) (bar y)))
                       (cl-cm:code-cid '(lambda (y) (bar y))))))))
 
 (test changing-a-referenced-identity-changes-the-referrer
   (multiple-value-bind (db) (fresh-test-database "rec")
-    (cl-cm-db:defidentity 'bar '(lambda (x) (baz x)) db)
-    (let ((foo-cid (cl-cm-db:defidentity 'foo '(lambda (y) (bar y)) db)))
+    (cl-cm-db:defidentity db 'bar '(lambda (x) (baz x)))
+    (let ((foo-cid (cl-cm-db:defidentity db 'foo '(lambda (y) (bar y)))))
       ;; the stored CID is reproducible from the database...
       (is (string= foo-cid
                    (cl-cm-db:database-code-cid db '(lambda (y) (bar y)))))
       ;; ...but changing BAR changes the CID FOO would now get...
-      (cl-cm-db:setidentity 'bar '(lambda (x) (baz x) x) db)
+      (cl-cm-db:setidentity db 'bar '(lambda (x) (baz x) x))
       (is (not (string= foo-cid
                         (cl-cm-db:database-code-cid db '(lambda (y) (bar y))))))
       ;; ...while FOO's stored source is untouched (identities are the stable part)

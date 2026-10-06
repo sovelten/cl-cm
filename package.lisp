@@ -78,6 +78,8 @@ identities they name: content addressing is recursive.")
    ;; identities
    #:defidentity
    #:setidentity
+   #:defun-identity
+   #:setf-identity
    #:identity-cid
    #:identity-code
    #:identity-key

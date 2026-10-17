@@ -200,6 +200,35 @@ addressable by their own hash. (A definition's CID therefore depends only
 on which identities existed when it was defined — a free reference to a
 name defined later is hashed by name.)
 
+### Compiled code
+
+The database also manages compiled code. `code-function` compiles the
+stored source of a CID on first use and caches the compiled function by
+CID (the cache is transient — compiled code is rebuilt from source on
+demand). Free function references are wired to the compiled function of
+the referenced CID, so recursive content addressing is executable: an
+already-compiled caller keeps reaching the versions it was compiled
+against even after a callee is redefined.
+
+```lisp
+(cl-cm-db:defidentity db 'inc  '(lambda (x) (+ x 1)))
+(cl-cm-db:defidentity db 'twice '(lambda (x) (inc (inc x))))
+
+(funcall (cl-cm-db:code-function db (cl-cm-db:identity-cid 'twice db)) 10)
+;; => 12
+
+(cl-cm-db:setidentity db 'inc '(lambda (x) (+ x 10)))
+;; TWICE still calls the version of INC it was compiled against...
+(funcall (cl-cm-db:code-function db (cl-cm-db:identity-cid 'twice db)) 10)
+;; => 12
+```
+
+`identity-function` is the same thing addressed by name; `code-references`
+recovers the references a stored CID was hashed with (from the identity
+log, so they do not drift), and `source-references` reports the references
+of a source expression against the current identities — useful before
+storing it.
+
 ### Retracting identities
 
 `retractidentity` removes an identity. It appends a `(:retract ...)`

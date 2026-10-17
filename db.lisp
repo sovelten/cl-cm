@@ -44,6 +44,11 @@
    (code :initform (make-hash-table :test #'equal)
          :accessor database-code
          :documentation "In-memory CID (string) -> CODE-ENTRY cache.")
+   (functions :initform (make-hash-table :test #'equal)
+              :accessor database-functions
+              :documentation "In-memory CID (string) -> compiled function
+cache.  Compiled code is transient: it is rebuilt from the stored source
+on demand and is not persisted.")
    (loaded-p :initform nil
              :accessor database-loaded-p
              :documentation "True once LOAD-DATABASE has populated the caches."))
@@ -317,25 +322,29 @@ For `:define' and `:set', CID is required and the record is
                     (simplify-string (timestamp-string))
                     (simplify-string key)))))))
 
-(defun apply-identity-record (db record)
-  "Fold one identity-log RECORD into DB's in-memory identity table.
+(defun fold-identity-record (identities record)
+  "Fold one identity-log RECORD into the IDENTITIES hash table.
 
 A `:define' or `:set' record associates the key with its CID; a
 `:retract' record removes the key.  Malformed records are ignored with a
-warning."
+warning.  This is the pure part of APPLY-IDENTITY-RECORD, shared with the
+log replay that reconstructs a historical identity table."
   (unless (and (consp record)
                (member (first record) '(:define :set :retract))
                (stringp (third record)))
     (warn "Ignoring malformed identity-log record: ~S" record)
-    (return-from apply-identity-record nil))
+    (return-from fold-identity-record nil))
   (cond ((eq (first record) :retract)
-         (remhash (third record) (database-identities db)))
+         (remhash (third record) identities))
         ((stringp (fourth record))
-         (setf (gethash (third record) (database-identities db))
-               (fourth record)))
+         (setf (gethash (third record) identities) (fourth record)))
         (t
          (warn "Ignoring malformed identity-log record: ~S" record)))
   nil)
+
+(defun apply-identity-record (db record)
+  "Fold one identity-log RECORD into DB's in-memory identity table."
+  (fold-identity-record (database-identities db) record))
 
 (defun read-identity-records (db)
   "Return DB's whole identity log as a list of records, in file order.
@@ -374,6 +383,7 @@ Returns NIL when the log does not exist yet."
 cached state.  Idempotent; returns DB."
   (clrhash (database-identities db))
   (clrhash (database-code db))
+  (clrhash (database-functions db))
   (read-identity-log db)
   (read-code-store db)
   (setf (database-loaded-p db) t)
@@ -500,6 +510,133 @@ literally NIL; use IDENTITY-CID to tell the two apart."
     (and cid
          (code-entry-source (gethash cid (database-code db))))))
 
+(defun code-by-cid (db cid)
+  "The source expression stored for CID in DB, or NIL when unsupported.
+
+Unlike IDENTITY-CODE, this does not go through a name: it addresses the
+code itself, so it still works for a CID that no current identity names
+(a superseded version, or code stored with STORE-CODE).  This is what
+lets a caller pinned to an old CID keep running after a reload."
+  (ensure-database db)
+  (let ((entry (gethash cid (database-code db))))
+    (and entry (code-entry-source entry))))
+
+;;; ------------------------------------------------------------------
+;;; References and compiled code
+;;; ------------------------------------------------------------------
+;;;
+;;; A definition's free function references were resolved to CIDs when
+;;; its CID was computed.  Because the identity log is replayable, that
+;;; resolution can be recovered afterwards -- so a stored definition's
+;;; references stay meaningful even after the names it mentions have been
+;;; redefined.  CODE-FUNCTION then compiles the source with those
+;;; references wired to the compiled function of the referenced CID,
+;;; which is what makes recursive content addressing executable: a
+;;; compiled caller keeps reaching the versions it was compiled against.
+;;;
+;;; Compiled functions are transient (cached per database and CID) and are
+;;; rebuilt from source on demand; nothing about them is persisted.
+
+(defun identities-before-cid (db cid)
+  "The identity table as it was when CID was first stored.
+
+The identity log is replayed up to the first record mentioning CID, so
+those are exactly the identities CL-CM resolved against when it computed
+CID."
+  (let ((identities (make-hash-table :test #'equal)))
+    (dolist (record (read-identity-records db) identities)
+      (when (and (member (first record) '(:define :set))
+                 (stringp (fourth record))
+                 (string= (fourth record) cid))
+        (return identities))
+      (fold-identity-record identities record))))
+
+(defun references-in (identities source)
+  "Resolve SOURCE's free references against the IDENTITIES table.
+Returns (values REFERENCES UNRESOLVED): REFERENCES is a sorted alist
+(SYMBOL . CID) of free *function* references that named an identity, and
+UNRESOLVED is the sorted list of free function symbols that did not."
+  (let ((references '())
+        (free '()))
+    (let ((cl-cm:*reference-resolver*
+            (lambda (namespace symbol)
+              (let ((cid (gethash (identity-key symbol) identities)))
+                (when (eq namespace :function)
+                  (pushnew symbol free)
+                  (when cid
+                    (pushnew (cons symbol cid) references :key #'car)))
+                cid))))
+      (cl-cm:normalize-code source))
+    (values (sort references #'string< :key (lambda (pair) (symbol-name (car pair))))
+            (sort (set-difference free (mapcar #'car references))
+                  #'string< :key #'symbol-name))))
+
+(defun source-references (db source)
+  "References of SOURCE against DB's *current* identities.
+
+Suitable before storing SOURCE, e.g. to reject unresolvable references:
+returns (values REFERENCES UNRESOLVED) like CODE-REFERENCES."
+  (ensure-database db)
+  (references-in (database-identities db) source))
+
+(defun code-references (db cid)
+  "References the code stored as CID was resolved with.
+
+Resolved against the identity table as it was when CID was stored, not the
+current one, so a definition's references do not drift when the names it
+mentions are redefined.  Returns (values REFERENCES UNRESOLVED)."
+  (ensure-database db)
+  (let ((source (code-by-cid db cid)))
+    (unless source
+      (error "No code is stored for CID ~A." cid))
+    (references-in (identities-before-cid db cid) source)))
+
+(defun code-function (db cid)
+  "The compiled function of the code stored as CID, compiling it on first use.
+
+The source must be a lambda form.  Its free function references are wired,
+at compile time, to a call-time lookup of the compiled function of the
+referenced CID, so an already-compiled caller keeps reaching the versions
+it was compiled against even when a callee is redefined.  The compiled
+function is cached per database and CID; two names for the same code share
+one function."
+  (ensure-database db)
+  (or (gethash cid (database-functions db))
+      (let ((source (code-by-cid db cid)))
+        (unless (and (consp source) (eq (first source) 'lambda))
+          (error "Code ~A is not a lambda form and cannot be compiled." cid))
+        (multiple-value-bind (references unresolved) (code-references db cid)
+          (declare (ignore unresolved))
+          (let* ((lambda-list (second source))
+                 (body (cddr source))
+                 (names (mapcar #'car references))
+                 (rest (gensym "REST-"))
+                 ;; A referenced name may be a symbol of a locked package
+                 ;; (GET, REMOVE, ...).  Binding it with FLET is exactly how
+                 ;; the reference is pinned to a CID; lift the lock for
+                 ;; those names in this compilation unit (SBCL only).
+                 (declarations
+                   #+sbcl (when references
+                            `((declare (sb-ext:disable-package-locks ,@names))))
+                   #-sbcl nil)
+                 (wired
+                   (if references
+                       `(flet (,@(loop for (name . ref-cid) in references
+                                       collect `(,name (&rest ,rest)
+                                                 (apply (code-function ,db ,ref-cid)
+                                                        ,rest))))
+                          (function (lambda ,lambda-list ,@body)))
+                       `(function (lambda ,lambda-list ,@body))))
+                 (function
+                   (funcall (compile nil `(lambda () ,@declarations ,wired)))))
+            (setf (gethash cid (database-functions db)) function)
+            function)))))
+
+(defun identity-function (identity db)
+  "The compiled function of the code currently bound to IDENTITY, or NIL."
+  (let ((cid (identity-cid identity db)))
+    (and cid (code-function db cid))))
+
 (defun clean-database (db &key (mode :shallow) dry-run)
   "Remove object files from DB's code store that are no longer needed.
 
@@ -591,5 +728,6 @@ Returns a plist (:MODE MODE :KEPT KEPT :REMOVED REMOVED :FREED-BYTES N)."
                               0))
                     (unless dry-run
                       (ignore-errors (delete-file file))
-                      (remhash cid (database-code db))))))))
+                      (remhash cid (database-code db))
+                      (remhash cid (database-functions db))))))))
         (list :mode mode :kept kept :removed removed :freed-bytes freed)))))

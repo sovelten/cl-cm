@@ -77,6 +77,10 @@ identities they name: content addressing is recursive.")
    #:code-store-path
    #:database-identities
    #:database-code
+   #:database-functions
+   #:code-entry
+   #:code-entry-source
+   #:code-by-cid
    ;; identities
    #:defidentity
    #:setidentity
@@ -91,4 +95,9 @@ identities they name: content addressing is recursive.")
    #:database-code-node
    #:database-code-blob
    #:database-code-cid
-   #:store-code))
+   #:store-code
+   ;; references and compiled code
+   #:source-references
+   #:code-references
+   #:code-function
+   #:identity-function))

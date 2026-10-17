@@ -637,6 +637,145 @@ one function."
   (let ((cid (identity-cid identity db)))
     (and cid (code-function db cid))))
 
+(defun call-identity (identity db &rest arguments)
+  "Call IDENTITY's current code against ARGUMENTS, compiled through DB.
+Returns whatever the code returns (including multiple values).  Signals an
+error when IDENTITY is not defined."
+  (let ((function (identity-function identity db)))
+    (unless function
+      (error "Identity ~A is not defined." (identity-key identity)))
+    (apply function arguments)))
+
+;;; ------------------------------------------------------------------
+;;; Definitions and reverse lookups
+;;; ------------------------------------------------------------------
+;;;
+;;; A CODE-DEFINITION bundles a CID with the source form stored for it, so
+;;; callers do not have to pair CODE-BY-CID with the source accessors
+;;; themselves.  The identity table is queried in both directions: a
+;;; definition by name, and the names a CID is currently bound to.
+
+(defstruct (code-definition (:constructor %make-code-definition (cid source)))
+  "One stored definition: its CID and the source form.
+Use CODE-DEFINITION-LAMBDA-LIST and CODE-DEFINITION-BODY to split a
+`(lambda ...)' source."
+  cid
+  source)
+
+(defun code-definition-lambda-list (definition)
+  "The lambda list of DEFINITION's `(lambda ...)' source."
+  (second (code-definition-source definition)))
+
+(defun code-definition-body (definition)
+  "The body forms of DEFINITION's `(lambda ...)' source."
+  (cddr (code-definition-source definition)))
+
+(defun definition-by-cid (db cid)
+  "The CODE-DEFINITION stored as CID, or NIL.
+NIL when CID is unknown, or when its source is not a lambda form."
+  (let ((source (code-by-cid db cid)))
+    (when (and (consp source) (eq (first source) 'lambda))
+      (%make-code-definition cid source))))
+
+(defun definition-by-identity (identity db)
+  "The CODE-DEFINITION currently bound to IDENTITY, or NIL."
+  (let ((cid (identity-cid identity db)))
+    (and cid (definition-by-cid db cid))))
+
+(defun identity-symbol (key)
+  "The symbol an identity KEY names, or NIL when its package is absent.
+
+Identity keys are strings (`PKG::NAME', or `#::NAME' for an uninterned
+symbol) so they can be read back without the packages that produced them.
+This turns one back into a symbol when that package exists in the image."
+  (let ((separator (search "::" key :from-end t)))
+    (when separator
+      (let ((package-name (subseq key 0 separator))
+            (symbol-name (subseq key (+ separator 2))))
+        (cond
+          ((string= package-name "#") (make-symbol symbol-name))
+          (t
+           (let ((package (find-package package-name)))
+             (when package
+               (multiple-value-bind (symbol status)
+                   (find-symbol symbol-name package)
+                 (if (and symbol (member status '(:internal :external)))
+                     symbol
+                     (make-symbol symbol-name)))))))))))
+
+(defun identity-names-for-cid (db cid)
+  "The identity keys currently bound to CID in DB, sorted."
+  (ensure-database db)
+  (let ((names '()))
+    (maphash (lambda (key value)
+               (when (string= value cid)
+                 (push key names)))
+             (database-identities db))
+    (sort names #'string<)))
+
+(defun identity-history (identity db)
+  "The CIDs IDENTITY has been bound to in DB, newest first."
+  (let ((key (identity-key identity)))
+    (remove-duplicates
+     (loop for record in (reverse (read-identity-records db))
+           when (and (consp record)
+                     (member (first record) '(:define :set))
+                     (string= (third record) key)
+                     (stringp (fourth record)))
+             collect (fourth record))
+     :test #'string=)))
+
+(defun code-referrers (db cid)
+  "The identity keys whose current definition references CID.
+Based on CIDs, so it is naming-independent: renaming a referrer does not
+change the answer."
+  (ensure-database db)
+  (let ((out '()))
+    (maphash (lambda (key bound-cid)
+               (when (find cid (code-references db bound-cid)
+                           :test #'string= :key #'cdr)
+                 (push key out)))
+             (database-identities db))
+    (sort (remove-duplicates out) #'string<)))
+
+;;; ------------------------------------------------------------------
+;;; Whole-database helpers
+;;; ------------------------------------------------------------------
+
+(defun ensure-identity (db identity form)
+  "Define IDENTITY with FORM, or change its code to FORM when it exists.
+This is the upsert of DEFIDENTITY and SETIDENTITY: a new identity gets a
+`:define' record, an existing one a `:set' record.  Re-storing the same
+content is a no-op (no log record), since the CID is unchanged.  Returns
+the CID."
+  (ensure-database db)
+  (let ((current (gethash (identity-key identity) (database-identities db))))
+    (cond ((null current)
+           (defidentity db identity form))
+          ((string= current (database-code-cid db form))
+           current)
+          (t
+           (setidentity db identity form)))))
+
+(defun code-count (db)
+  "Number of distinct definitions (CIDs) stored in DB."
+  (ensure-database db)
+  (hash-table-count (database-code db)))
+
+(defun map-definitions (function db)
+  "Call FUNCTION with each CODE-DEFINITION in DB, in CID order.  Returns DB."
+  (ensure-database db)
+  (let ((cids '()))
+    (maphash (lambda (cid entry)
+               (declare (ignore entry))
+               (push cid cids))
+             (database-code db))
+    (dolist (cid (sort cids #'string<))
+      (let ((definition (definition-by-cid db cid)))
+        (when definition
+          (funcall function definition)))))
+  db)
+
 (defun clean-database (db &key (mode :shallow) dry-run)
   "Remove object files from DB's code store that are no longer needed.
 

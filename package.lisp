@@ -100,4 +100,21 @@ identities they name: content addressing is recursive.")
    #:source-references
    #:code-references
    #:code-function
-   #:identity-function))
+   #:identity-function
+   #:call-identity
+   ;; definitions and reverse lookups
+   #:code-definition
+   #:code-definition-cid
+   #:code-definition-source
+   #:code-definition-lambda-list
+   #:code-definition-body
+   #:definition-by-cid
+   #:definition-by-identity
+   #:identity-symbol
+   #:identity-names-for-cid
+   #:identity-history
+   #:code-referrers
+   ;; whole-database helpers
+   #:ensure-identity
+   #:code-count
+   #:map-definitions))

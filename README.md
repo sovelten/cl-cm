@@ -229,6 +229,28 @@ log, so they do not drift), and `source-references` reports the references
 of a source expression against the current identities — useful before
 storing it.
 
+### Definitions and reverse lookups
+
+`definition-by-identity` and `definition-by-cid` return a
+`code-definition` holding the CID and source; `code-definition-lambda-list`
+and `code-definition-body` split a `(lambda ...)` source. Reverse lookups
+go back the other way: `identity-names-for-cid` lists the names currently
+bound to a CID, `identity-history` lists the CIDs a name has been bound to,
+and `code-referrers` lists the names whose current definition references a
+CID (by CID, so renaming a referrer does not change the answer).
+
+```lisp
+(cl-cm-db:identity-cid 'twice db)          ; -> current CID
+(cl-cm-db:identity-names-for-cid db cid)   ; -> ("CL-USER::TWICE" ...)
+(cl-cm-db:identity-history 'twice db)      ; -> (newest ... oldest)
+(cl-cm-db:code-referrers db inc-cid)       ; -> ("CL-USER::TWICE")
+```
+
+`ensure-identity` is the upsert of `defidentity`/`setidentity`: it defines a
+new identity, or changes an existing one, and treats re-storing identical
+content as a no-op. `code-count` and `map-definitions` are the natural
+whole-database queries.
+
 ### Retracting identities
 
 `retractidentity` removes an identity. It appends a `(:retract ...)`

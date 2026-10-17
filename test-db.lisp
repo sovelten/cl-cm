@@ -247,6 +247,94 @@ Returns (values DATABASE DIRECTORY)."
               (is (equal '(g) (cl-cm-db:identity-code 'bar db2))))))))))
 
 ;;; ------------------------------------------------------------------
+;;; Definitions, names and referrers
+;;; ------------------------------------------------------------------
+
+(test definition-by-identity-and-cid
+  (multiple-value-bind (db) (fresh-test-database "defn")
+    (let ((cid (cl-cm-db:defidentity db 'inc '(lambda (x) (+ x 1)))))
+      (let ((definition (cl-cm-db:definition-by-identity 'inc db)))
+        (is (typep definition 'cl-cm-db:code-definition))
+        (is (string= cid (cl-cm-db:code-definition-cid definition)))
+        (is (equal '(x) (cl-cm-db:code-definition-lambda-list definition)))
+        (is (equal '((+ x 1)) (cl-cm-db:code-definition-body definition))))
+      (is (string= cid (cl-cm-db:code-definition-cid
+                        (cl-cm-db:definition-by-cid db cid)))))))
+
+(test identity-names-and-history
+  (multiple-value-bind (db) (fresh-test-database "names")
+    (cl-cm-db:defidentity db 'a '(lambda (x) (+ x 1)))
+    (let ((first (cl-cm-db:identity-cid 'a db)))
+      (cl-cm-db:defidentity db 'b '(lambda (x) (+ x 1)))
+      (is (equal (list (cl-cm-db:identity-key 'a) (cl-cm-db:identity-key 'b))
+                 (cl-cm-db:identity-names-for-cid db first)))
+      (is (eq 'a (cl-cm-db:identity-symbol (cl-cm-db:identity-key 'a))))
+      (let ((second (cl-cm-db:setidentity db 'a '(lambda (x) (+ x 2)))))
+        (is (equal (list second first)
+                   (cl-cm-db:identity-history 'a db)))))))
+
+(test code-references-are-historical-and-referrers-follow-the-cid
+  (multiple-value-bind (db) (fresh-test-database "refs")
+    (let ((callee (cl-cm-db:defidentity db 'callee '(lambda (x) (+ x 1)))))
+      (let ((caller (cl-cm-db:defidentity db 'caller '(lambda (x) (callee x)))))
+        (multiple-value-bind (references unresolved) (cl-cm-db:code-references db caller)
+          (is (equal (list (cons 'callee callee)) references))
+          (is (null unresolved)))
+        ;; Redefining the callee does not move the caller's stored references.
+        (cl-cm-db:setidentity db 'callee '(lambda (x) (+ x 2)))
+        (multiple-value-bind (references) (cl-cm-db:code-references db caller)
+          (is (equal (list (cons 'callee callee)) references)))
+        (is (equal (list (cl-cm-db:identity-key 'caller))
+                   (cl-cm-db:code-referrers db callee)))
+        (is (null (cl-cm-db:code-referrers
+                   db (cl-cm-db:identity-cid 'callee db))))))))
+
+(test source-references-use-current-identities
+  (multiple-value-bind (db) (fresh-test-database "src")
+    (cl-cm-db:defidentity db 'helper '(lambda (x) x))
+    (multiple-value-bind (references unresolved)
+        (cl-cm-db:source-references db '(lambda (y) (helper y)))
+      (is (equal (list (cons 'helper (cl-cm-db:identity-cid 'helper db)))
+                 references))
+      (is (null unresolved)))))
+
+;;; ------------------------------------------------------------------
+;;; Compiled code
+;;; ------------------------------------------------------------------
+
+(test code-function-pins-superseded-versions
+  (multiple-value-bind (db) (fresh-test-database "compile")
+    (cl-cm-db:defidentity db 'inc '(lambda (x) (+ x 1)))
+    (let ((twice (cl-cm-db:defidentity db 'twice '(lambda (x) (inc (inc x))))))
+      (is (= 12 (funcall (cl-cm-db:code-function db twice) 10)))
+      (cl-cm-db:setidentity db 'inc '(lambda (x) (+ x 10)))
+      (is (= 12 (funcall (cl-cm-db:code-function db twice) 10))
+          "TWICE still calls the version of INC it was compiled against")
+      (let ((twice2 (cl-cm-db:setidentity db 'twice '(lambda (x) (inc (inc x))))))
+        (is (= 30 (funcall (cl-cm-db:code-function db twice2) 10)))))))
+
+(test call-identity-and-whole-database-helpers
+  (multiple-value-bind (db) (fresh-test-database "helpers")
+    (cl-cm-db:defidentity db 'inc '(lambda (x) (+ x 1)))
+    (cl-cm-db:defidentity db 'double '(lambda (x) (* x 2)))
+    (is (= 12 (cl-cm-db:call-identity 'inc db 11)))
+    (is (= 2 (cl-cm-db:code-count db)))
+    (let ((seen '()))
+      (cl-cm-db:map-definitions
+       (lambda (definition)
+         (push (cl-cm-db:code-definition-cid definition) seen))
+       db)
+      (is (= 2 (length seen))))))
+
+(test ensure-identity-defines-then-sets
+  (multiple-value-bind (db) (fresh-test-database "ensure")
+    (let ((first (cl-cm-db:ensure-identity db 'foo '(lambda () 1))))
+      (is (equal '(lambda () 1) (cl-cm-db:identity-code 'foo db)))
+      (let ((second (cl-cm-db:ensure-identity db 'foo '(lambda () 2))))
+        (is (not (string= first second)))
+        (is (equal '(lambda () 2) (cl-cm-db:identity-code 'foo db)))))))
+
+;;; ------------------------------------------------------------------
 ;;; Suite runner, used by RUN-SELF-TEST
 ;;; ------------------------------------------------------------------
 

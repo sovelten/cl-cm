@@ -118,13 +118,15 @@ The database is split in two, each half in its own file:
   definition or redefinition appends one readable line:
 
   ```lisp
-  (:define "2024-05-01T09:30:00Z" "CL-USER::FACT" "bafyreidpgybb...")
-  (:set    "2024-05-01T09:41:12Z" "CL-USER::FACT" "bafyreih4xt...")
+  (:define  "2024-05-01T09:30:00Z" "CL-USER::FACT" "bafyreidpgybb...")
+  (:set     "2024-05-01T09:41:12Z" "CL-USER::FACT" "bafyreih4xt...")
+  (:retract "2024-05-01T09:55:03Z" "CL-USER::FACT")
   ```
 
   Folding the file from the top and keeping the last record per key yields
   the *current* identities, so a later compaction can rewrite it in place
-  without changing the format. Each line carries a UTC timestamp.
+  without changing the format. `:define` and `:set` carry a CID; `:retract`
+  removes the key. Each line carries a UTC timestamp.
 
 * **The code store** — a directory, `NAME.objects/`, with one object file
   per CID (git/Unison-style). Each object file holds two things: the
@@ -144,19 +146,36 @@ is *recursive*: a definition's CID depends on the CIDs of the identities it
 references.
 
 ```lisp
-(defparameter db (cl-cm-db:make-database :directory #p"~/code-db/" :name "my"))
+;; INIT-DATABASE creates a new database or loads an existing one, so the
+;; same call works on a fresh checkout and on a populated directory.
+;; It returns (values DB EXISTED-P).
+(defparameter db (cl-cm-db:init-database :directory #p"~/code-db/" :name "test"))
+;; => #<CODE-DATABASE ...>          ; or (values DB T) if code-db/ was already there
 
-(cl-cm-db:load-database db)                    ; populate the in-memory caches
+;; First definition: DEFUN-IDENTITY defuns MULT *and* logs a :define record.
+(cl-cm-db:defun-identity mult db (x y) (* x y))
+;; => "bafyrei..."   (object written to test.objects/, :define in test.identities)
 
-(cl-cm-db:defidentity db 'fact
-  '(lambda (n) (if (zerop n) 1 (* n (fact (1- n))))))
-;; => "bafyrei..."  (also stored in the code store, logged in the identity log)
+;; Redefine it: SETF-IDENTITY defuns MULT again and logs a :set record.
+(cl-cm-db:setf-identity mult db (x y z) (* x y z))
+;; => "bafyrei..."   (new object; a :set line appended to test.identities)
 
-(cl-cm-db:setidentity db 'fact '(lambda (n) (factorial n)))   ; change it
-
-(cl-cm-db:identity-cid 'fact db)    ; -> current CID
-(cl-cm-db:identity-code 'fact db)   ; -> the stored source expression
+(cl-cm-db:identity-cid 'mult db)    ; -> current CID
+(cl-cm-db:identity-code 'mult db)   ; -> (LAMBDA (X Y Z) (* X Y Z))
 ```
+
+The data-level API takes the source expression *as data* and never
+evaluates it; `db` still comes first because the database defines the
+environment the code is resolved against:
+
+```lisp
+(cl-cm-db:defidentity db 'square '(lambda (n) (* n n)))
+(cl-cm-db:setidentity db 'square '(lambda (n) (let ((s (* n n))) s)))
+```
+
+`make-database` only builds the object (it does not touch disk);
+`init-database` is `make-database` followed by `load-database`, and
+`ensure-database` lazily loads an object the first time it is used.
 
 `defidentity` signals an error when the identity is already defined;
 `setidentity` signals one when it is not — so the two are hard to confuse.
@@ -181,10 +200,82 @@ addressable by their own hash. (A definition's CID therefore depends only
 on which identities existed when it was defined — a free reference to a
 name defined later is hashed by name.)
 
-Key functions: `make-database`, `load-database` / `ensure-database`,
-`defidentity`, `setidentity`, `defun-identity`, `setf-identity`,
-`identity-cid`, `identity-code`, `store-code`, `database-code-cid`,
-`database-code-node`, `database-code-blob`, `database-resolver`.
+### Retracting identities
+
+`retractidentity` removes an identity. It appends a `(:retract ...)`
+record and drops the key from the current identities; the old object stays
+on disk until you clean it up.
+
+```lisp
+(cl-cm-db:retractidentity db 'square)
+;; => "bafyrei..."           ; the CID SQUARE had
+(cl-cm-db:identity-cid 'square db)   ; => NIL
+(cl-cm-db:identity-code 'square db)  ; => NIL
+```
+
+Retracting an identity that is not defined signals an error, just like
+`setidentity` — so an accidental retraction is hard to miss.
+
+### Cleaning the object store
+
+Object files are immutable, so redefining or retracting an identity leaves
+superseded objects behind. `clean-database` reaps them, in two modes:
+
+```lisp
+;; :shallow -- keep every object named anywhere in the log (history is
+;; preserved), delete only objects that no record refers to.
+(cl-cm-db:clean-database db :mode :shallow)
+;; => (:MODE :SHALLOW :KEPT 3 :REMOVED 1 :FREED-BYTES 321)
+
+;; :deep -- compact the log to the current identities (latest record per
+;; key, retracted keys dropped), then delete every object those current
+;; identities do not reference.
+(cl-cm-db:clean-database db :mode :deep)
+;; => (:MODE :DEEP :KEPT 2 :REMOVED 2 :FREED-BYTES 644)
+
+;; Preview the effect without deleting or rewriting anything:
+(cl-cm-db:clean-database db :mode :deep :dry-run t)
+```
+
+`:shallow` is the safe, history-preserving choice; `:deep` is the
+space-reclaiming one, and also rewrites `NAME.identities` in the same
+one-record-per-line format. Both return a plist reporting how many objects
+were kept, removed, and how many bytes were freed.
+
+### Resolving references through the database
+
+Because the database knows every current identity, it doubles as a cl-cm
+`*reference-resolver*`: `database-resolver` returns a closure mapping a
+free name to the CID of the identity it names. That is what makes content
+addressing recursive — a referrer's CID depends on the CIDs it references:
+
+```lisp
+;; A definition that references MULT.
+(cl-cm-db:defidentity db 'double '(lambda (n) (mult n 2)))
+
+;; Ask cl-cm for the CID of the same form, resolved through the database.
+(let ((cl-cm:*reference-resolver* (cl-cm-db:database-resolver db)))
+  (cl-cm:code-cid '(lambda (n) (mult n 2))))
+;; => DOUBLE's CID: the reference to MULT resolved to MULT's CID
+
+;; ...or pass the resolver explicitly:
+(cl-cm:code-cid-with-resolver
+ '(lambda (n) (mult n 2))
+ (cl-cm-db:database-resolver db))
+;; => the same CID
+```
+
+`database-code-cid` is the one-step version (`code-cid` plus the database
+resolver); `database-code-node` and `database-code-blob` expose the
+resolved canonical tree and its CBOR bytes. Changing `mult` with
+`setidentity` changes the CID that `double` *would now get* — while
+`double`'s stored source stays stable until you redefine it too.
+
+Key functions: `make-database`, `init-database`, `load-database` /
+`ensure-database`, `defidentity`, `setidentity`, `retractidentity`,
+`defun-identity`, `setf-identity`, `identity-cid`, `identity-code`,
+`clean-database`, `store-code`, `database-code-cid`, `database-code-node`,
+`database-code-blob`, `database-resolver`.
 
 ## Extending
 

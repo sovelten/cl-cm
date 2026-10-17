@@ -71,6 +71,29 @@ those defaults when supplied."
                                    (merge-pathnames
                                     (format nil "~A.objects/" name) dir)))))
 
+(defun init-database (&key (directory #p"./") (name "cl-cm-db")
+                           identity-log code-store)
+  "Open the code database under DIRECTORY, creating it when it is absent.
+
+This is MAKE-DATABASE followed by LOAD-DATABASE, i.e. create new or load
+existing: if an identity log or code store already lives under DIRECTORY
+it is read into memory, and otherwise DIRECTORY simply holds a fresh,
+empty database that is ready to use.  The identity log is
+DIRECTORY/NAME.identities and the code store is the directory
+DIRECTORY/NAME.objects/; IDENTITY-LOG and CODE-STORE override those
+defaults when supplied.
+
+Returns (values DATABASE EXISTED-P), where EXISTED-P is true when a
+database was already present on disk."
+  (let ((db (make-database :directory directory :name name
+                           :identity-log identity-log
+                           :code-store code-store)))
+    (let ((existed-p (or (and (identity-log-path db)
+                              (probe-file (identity-log-path db)))
+                         (uiop:directory-exists-p (code-store-path db)))))
+      (load-database db)
+      (values db (and existed-p t)))))
+
 ;;; ------------------------------------------------------------------
 ;;; Identity keys and timestamps
 ;;; ------------------------------------------------------------------
@@ -270,8 +293,12 @@ loaded, its identities are loaded first so resolution is correct."
 ;;; The identity log
 ;;; ------------------------------------------------------------------
 
-(defun append-identity-record (db op key cid)
-  "Append one `(OP <timestamp> KEY CID)' record to DB's identity log."
+(defun append-identity-record (db op key &optional cid)
+  "Append one identity-log record to DB's identity log.
+
+For `:define' and `:set', CID is required and the record is
+`(OP <timestamp> KEY CID)'.  For `:retract' the record is
+`(OP <timestamp> KEY)'."
   (let ((path (identity-log-path db)))
     (ensure-directories-exist path)
     (with-open-file (out path :direction :output
@@ -279,31 +306,53 @@ loaded, its identities are loaded first so resolution is correct."
                               :if-does-not-exist :create)
       (let ((*print-readably* t)
             (*print-pretty* nil))
-        (format out "(~S ~S ~S ~S)~%"
-                op
-                (simplify-string (timestamp-string))
-                (simplify-string key)
-                (simplify-string cid))))))
+        (if cid
+            (format out "(~S ~S ~S ~S)~%"
+                    op
+                    (simplify-string (timestamp-string))
+                    (simplify-string key)
+                    (simplify-string cid))
+            (format out "(~S ~S ~S)~%"
+                    op
+                    (simplify-string (timestamp-string))
+                    (simplify-string key)))))))
 
 (defun apply-identity-record (db record)
-  "Fold one identity-log RECORD into DB's in-memory identity table."
+  "Fold one identity-log RECORD into DB's in-memory identity table.
+
+A `:define' or `:set' record associates the key with its CID; a
+`:retract' record removes the key.  Malformed records are ignored with a
+warning."
   (unless (and (consp record)
-               (member (first record) '(:define :set))
-               (stringp (third record))
-               (stringp (fourth record)))
+               (member (first record) '(:define :set :retract))
+               (stringp (third record)))
     (warn "Ignoring malformed identity-log record: ~S" record)
     (return-from apply-identity-record nil))
-  (setf (gethash (third record) (database-identities db)) (fourth record)))
+  (cond ((eq (first record) :retract)
+         (remhash (third record) (database-identities db)))
+        ((stringp (fourth record))
+         (setf (gethash (third record) (database-identities db))
+               (fourth record)))
+        (t
+         (warn "Ignoring malformed identity-log record: ~S" record)))
+  nil)
 
-(defun read-identity-log (db)
-  "Read DB's whole identity log, latest record per key winning."
+(defun read-identity-records (db)
+  "Return DB's whole identity log as a list of records, in file order.
+
+Returns NIL when the log does not exist yet."
   (let ((path (identity-log-path db)))
     (when (probe-file path)
       (with-open-file (in path :direction :input)
         (let ((*read-eval* nil))
           (loop for record = (read in nil :eof)
                 until (eq record :eof)
-                do (apply-identity-record db record)))))))
+                collect record))))))
+
+(defun read-identity-log (db)
+  "Read DB's whole identity log, latest record per key winning."
+  (dolist (record (read-identity-records db))
+    (apply-identity-record db record)))
 
 (defun load-object-file (db file)
   "Read one object FILE into DB's in-memory code table."
@@ -382,6 +431,23 @@ log.  Returns the new CID."
              key))
     (%set-identity db identity form :set)))
 
+(defun retractidentity (db identity)
+  "Retract IDENTITY from DB, appending a `:retract' record to its log.
+
+DB comes first, like DEFIDENTITY and SETIDENTITY.  IDENTITY must be
+currently defined; signals an error otherwise.  The key is removed from
+the current identities and the CID it had is returned.  The object file
+is left untouched -- call CLEAN-DATABASE to reap it once it is no longer
+referenced."
+  (ensure-database db)
+  (let* ((key (identity-key identity))
+         (cid (gethash key (database-identities db))))
+    (unless cid
+      (error "Identity ~A is not defined; cannot retract it." key))
+    (append-identity-record db :retract key)
+    (remhash key (database-identities db))
+    cid))
+
 (defmacro defun-identity (name db lambda-list &body body)
   "Define NAME as a function and register it as an identity in DB.
 
@@ -433,3 +499,97 @@ literally NIL; use IDENTITY-CID to tell the two apart."
   (let ((cid (identity-cid identity db)))
     (and cid
          (code-entry-source (gethash cid (database-code db))))))
+
+(defun clean-database (db &key (mode :shallow) dry-run)
+  "Remove object files from DB's code store that are no longer needed.
+
+MODE selects how much history is kept:
+
+  :shallow (the default)
+      Keep every object whose CID appears anywhere in the identity log
+      -- including CIDs from superseded `:define'/`:set' records -- and
+      delete the rest.  The log itself is left exactly as it is, so old
+      identities remain re-derivable.
+
+  :deep
+      Compact the identity log down to the current identities (the last
+      record for each key, dropping retracted keys), then delete every
+      object whose CID is not referenced by those current identities.
+      Superseded history is discarded.
+
+When DRY-RUN is true nothing is deleted and the log is not rewritten;
+the return value still reports what would happen.
+
+Returns a plist (:MODE MODE :KEPT KEPT :REMOVED REMOVED :FREED-BYTES N)."
+  (ensure-database db)
+  (labels ((current-records (records)
+             "Latest non-retract record per key, in first-appearance order."
+             (let ((last (make-hash-table :test #'equal))
+                   (order '()))
+               (dolist (record records)
+                 (when (and (consp record)
+                            (stringp (third record))
+                            (member (first record) '(:define :set :retract)))
+                   (let ((key (third record)))
+                     (unless (nth-value 1 (gethash key last))
+                       (push key order))
+                     (setf (gethash key last) record))))
+               (loop for key in (nreverse order)
+                     for record = (gethash key last)
+                     when (member (first record) '(:define :set))
+                       collect record)))
+           (log-cids (records)
+             "Every distinct CID mentioned by a :define/:set record."
+             (remove-duplicates
+              (loop for record in records
+                    when (and (consp record)
+                              (member (first record) '(:define :set))
+                              (stringp (fourth record)))
+                      collect (fourth record))
+              :test #'string=))
+           (write-log (records)
+             (let* ((path (identity-log-path db))
+                    (tmp (merge-pathnames
+                          (format nil "~A.tmp" (pathname-name path))
+                          path)))
+               (ensure-directories-exist path)
+               (with-open-file (out tmp :direction :output
+                                        :if-exists :supersede
+                                        :if-does-not-exist :create)
+                 (let ((*print-readably* t)
+                       (*print-pretty* nil))
+                   (dolist (record records)
+                     (format out "~S~%" record))))
+               (uiop:rename-file-overwriting-target tmp path))))
+    (let* ((records (read-identity-records db))
+           (compacted (ecase mode
+                        (:shallow nil)
+                        (:deep (current-records records))))
+           (referenced (ecase mode
+                         (:shallow (log-cids records))
+                         (:deep (log-cids compacted)))))
+      (when (and (eq mode :deep) (not dry-run))
+        (write-log compacted)
+        (clrhash (database-identities db))
+        (read-identity-log db))
+      (let ((keep (make-hash-table :test #'equal))
+            (kept 0) (removed 0) (freed 0))
+        (dolist (cid referenced)
+          (setf (gethash cid keep) t))
+        (when (uiop:directory-exists-p (code-store-path db))
+          (dolist (file (uiop:directory-files (code-store-path db)))
+            (let ((cid (file-namestring file)))
+              (if (gethash cid keep)
+                  (incf kept)
+                  (progn
+                    (incf removed)
+                    (incf freed
+                          (or (ignore-errors
+                                (with-open-file (in file
+                                                    :element-type '(unsigned-byte 8))
+                                  (file-length in)))
+                              0))
+                    (unless dry-run
+                      (ignore-errors (delete-file file))
+                      (remhash cid (database-code db))))))))
+        (list :mode mode :kept kept :removed removed :freed-bytes freed)))))

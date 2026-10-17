@@ -68,8 +68,10 @@ identities they name: content addressing is recursive.")
    ;; database object
    #:code-database
    #:make-database
+   #:init-database
    #:load-database
    #:ensure-database
+   #:clean-database
    #:database-loaded-p
    #:identity-log-path
    #:code-store-path
@@ -78,6 +80,7 @@ identities they name: content addressing is recursive.")
    ;; identities
    #:defidentity
    #:setidentity
+   #:retractidentity
    #:defun-identity
    #:setf-identity
    #:identity-cid
